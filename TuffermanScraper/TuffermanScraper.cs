@@ -1,8 +1,6 @@
 ﻿using HtmlAgilityPack;
-using System;
-using System.Collections.Generic;
-using TuffermanScraper.Models;
-using TuffermanScraper.Util;
+using TuffermanScraper.Test.Models;
+using TuffermanScraper.Test.Utils;
 
 namespace TuffermanScraper
 {
@@ -14,6 +12,8 @@ namespace TuffermanScraper
         {
             _http = httpClient;
         }
+
+        // ---------- LISTING PAGES ----------
 
         public async Task<IReadOnlyList<Uri>> GetProductUrlsFromListingAsync(string listingUrl)
         {
@@ -30,11 +30,11 @@ namespace TuffermanScraper
                 return Array.Empty<Uri>();
             }
 
-            foreach (var node in productNodes)
+            foreach (var productNode in productNodes)
             {
                 var linkNode =
-                    node.SelectSingleNode(".//a[contains(@class,'product-item__link')]")
-                    ?? node.SelectSingleNode(".//a[contains(@class,'product-item__title')]");
+                    productNode.SelectSingleNode(".//a[contains(@class,'product-item__link')]") ??
+                    productNode.SelectSingleNode(".//a[contains(@class,'product-item__title')]");
 
                 if (linkNode == null)
                     continue;
@@ -53,25 +53,18 @@ namespace TuffermanScraper
             return productUrls.Select(u => new Uri(u)).ToList();
         }
 
-        public async Task<IReadOnlyList<Uri>> GetAllProductUrlsAsync(
-            string baseCollectionUrl,
-            int totalPages)
+        public async Task<IReadOnlyList<Uri>> GetAllProductUrlsAsync(string baseCollectionUrl, int totalPages)
         {
             var allUrls = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
             for (int page = 1; page <= totalPages; page++)
             {
-                var url = page == 1
-                    ? baseCollectionUrl
-                    : $"{baseCollectionUrl}?page={page}";
+                var url = page == 1 ? baseCollectionUrl : $"{baseCollectionUrl}?page={page}";
+                Console.WriteLine($"=== Page {page} of {totalPages} ===");
 
-                Console.WriteLine($"=== Page {page} of {totalPages}");
                 var pageUrls = await GetProductUrlsFromListingAsync(url);
-
                 foreach (var uri in pageUrls)
-                {
                     allUrls.Add(uri.ToString());
-                }
 
                 await Task.Delay(TimeSpan.FromSeconds(1));
             }
@@ -79,6 +72,8 @@ namespace TuffermanScraper
             Console.WriteLine($"Total unique product URLs found across all pages: {allUrls.Count}");
             return allUrls.Select(u => new Uri(u)).ToList();
         }
+
+        // ---------- PRODUCT PAGES ----------
 
         public async Task<IReadOnlyList<TuffermanVariant>> ScrapeProductPageAsync(Uri url)
         {
@@ -88,41 +83,37 @@ namespace TuffermanScraper
             var doc = new HtmlDocument();
             doc.LoadHtml(html);
 
-            // --- Base title ---
+            var supplier = SupplierParsing.ExtractSupplier(doc) ?? string.Empty;
+
             var titleNode = doc.DocumentNode.SelectSingleNode("//h1");
             var baseTitle = titleNode?.InnerText.Trim() ?? "";
 
-            // Optional breadcrumb/range
             var rangeOrCategory = "";
             var breadcrumbLast = doc.DocumentNode.SelectSingleNode("//nav[contains(@class,'breadcrumb')]//li[last()]");
             if (breadcrumbLast != null)
                 rangeOrCategory = HtmlEntity.DeEntitize(breadcrumbLast.InnerText.Trim());
 
-            // --- Key Features bullets ---
             var bulletsText = ExtractBullets(doc);
 
-            // --- Global EX-VAT price block for the *currently selected* variant ---
             var (pageWasExVat, pageNowExVat) = ExtractPricesExVat(doc);
+            Console.WriteLine($"  Prices (EX VAT): WAS={pageWasExVat} NOW={pageNowExVat}");
 
-            // --- Height (single value for this page) ---
             var heightText = ExtractSingleMetafieldValue(doc, "Height (mm):");
             var heightMm = Parsing.ToIntOrNull(heightText);
 
-            // --- Qty of Shelving Units (single value on this page) ---
             var unitsText = ExtractSingleMetafieldValue(doc, "Qty of Shelving Units:");
             var units = Parsing.ToIntOrNull(unitsText);
 
-            // --- Colour (single value on this page) ---
-            var colourText = ExtractColourMetafieldValue(doc); // e.g. "Grey" or "Blue"
+            var colourText = ExtractColourMetafieldValue(doc);
 
-            // --- Main variant <select> with width/depth/load/price per SKU ---
+            var deliveryDays = ExtractDeliveryDays(doc);
+
             var variants = new List<TuffermanVariant>();
 
             var selectNode = doc.DocumentNode.SelectSingleNode("//select[@name='id']");
             if (selectNode == null)
             {
-                Console.WriteLine("  !! No <select name='id'> variant list found; falling back to single variant");
-                // Fallback: at least return one row with page-level info
+                Console.WriteLine("  !! No <select name='id'> found; returning single variant with page-level info");
                 variants.Add(new TuffermanVariant
                 {
                     BaseTitle = baseTitle,
@@ -133,7 +124,9 @@ namespace TuffermanScraper
                     WasPriceExVat = pageWasExVat,
                     NowPriceExVat = pageNowExVat,
                     Url = url.ToString(),
-                    Bullets = bulletsText
+                    Bullets = bulletsText,
+                    Supplier = supplier,
+                    DeliveryDays = deliveryDays
                 });
                 return variants;
             }
@@ -141,7 +134,7 @@ namespace TuffermanScraper
             var optionNodes = selectNode.SelectNodes("./option");
             if (optionNodes == null || optionNodes.Count == 0)
             {
-                Console.WriteLine("  !! <select name='id'> had no <option> children");
+                Console.WriteLine("  !! <select name='id'> has no options; returning single variant");
                 variants.Add(new TuffermanVariant
                 {
                     BaseTitle = baseTitle,
@@ -152,7 +145,9 @@ namespace TuffermanScraper
                     WasPriceExVat = pageWasExVat,
                     NowPriceExVat = pageNowExVat,
                     Url = url.ToString(),
-                    Bullets = bulletsText
+                    Bullets = bulletsText,
+                    Supplier = supplier,
+                    DeliveryDays = deliveryDays
                 });
                 return variants;
             }
@@ -163,66 +158,98 @@ namespace TuffermanScraper
                 if (string.IsNullOrWhiteSpace(text))
                     continue;
 
-                // Example option text:
-                // "900 / 300 / 200kg - £107.99"
-                // or "1200 / 300 / 280kg - £205.19"
-                // We'll split around '-' and '/'.
-                string? sizePart = null;
+                // e.g. "900 / 300 / 200kg - £107.99"
+                // or "1800h x 900w x 450d / 200kg / 37L - £113.99"
+                string? left = null;
                 string? pricePart = null;
 
                 var dashSplit = text.Split('-', 2);
                 if (dashSplit.Length == 2)
                 {
-                    sizePart = dashSplit[0].Trim();
+                    left = dashSplit[0].Trim();
                     pricePart = dashSplit[1].Trim();
                 }
                 else
                 {
-                    sizePart = text;
+                    left = text;
                 }
 
+                int? heightFromDim = null;
                 int? widthMm = null;
                 int? depthMm = null;
                 int? loadPerShelfKg = null;
 
-                if (!string.IsNullOrEmpty(sizePart))
+                if (!string.IsNullOrEmpty(left))
                 {
-                    var pieces = sizePart.Split('/')
-                                         .Select(p => p.Trim())
-                                         .ToArray();
+                    var pieces = left.Split('/')
+                                     .Select(p => p.Trim())
+                                     .ToArray();
 
-                    if (pieces.Length >= 1)
-                        widthMm = Parsing.ToIntOrNull(pieces[0]);              // 900
-                    if (pieces.Length >= 2)
-                        depthMm = Parsing.ToIntOrNull(pieces[1]);              // 300 / 450 / 600
-                    if (pieces.Length >= 3)
-                        loadPerShelfKg = Parsing.ToIntOrNull(pieces[2]);       // "200kg" / "280kg"
+                    if (pieces.Length > 0)
+                    {
+                        var dim = pieces[0];
+
+                        if (dim.Contains('x'))
+                        {
+                            // "1800h x 900w x 450d"
+                            var dims = dim.Split('x')
+                                          .Select(d => d.Trim())
+                                          .ToArray();
+                            if (dims.Length >= 3)
+                            {
+                                heightFromDim = Parsing.ToIntOrNull(dims[0]);
+                                widthMm = Parsing.ToIntOrNull(dims[1]);
+                                depthMm = Parsing.ToIntOrNull(dims[2]);
+                            }
+                        }
+                        else
+                        {
+                            // "900 / 300 / 200kg" style (older)
+                            var dims = dim.Split('/')
+                                          .Select(d => d.Trim())
+                                          .ToArray();
+                            if (dims.Length >= 1) widthMm = Parsing.ToIntOrNull(dims[0]);
+                            if (dims.Length >= 2) depthMm = Parsing.ToIntOrNull(dims[1]);
+                            if (dims.Length >= 3) loadPerShelfKg = Parsing.ToIntOrNull(dims[2]);
+                        }
+                    }
+
+                    if (pieces.Length > 1)
+                        loadPerShelfKg ??= Parsing.ToIntOrNull(pieces[1]);
                 }
+
+                // Fallback for depth: dedicated "Depth (mm)" group
+                if (depthMm == null)
+                {
+                    var depthText = ExtractOptionGroupValue(doc, "Depth (mm)");
+                    depthMm = Parsing.ToIntOrNull(depthText);
+                }
+
+                // Height: prefer explicit Height metafield, then dimension
+                var effectiveHeight = heightMm ?? heightFromDim;
+                var levels = ExtractLevelsForVariant(doc, opt);
 
                 decimal? variantPriceExVat = null;
                 if (!string.IsNullOrEmpty(pricePart))
-                {
-                    // e.g. "£107.99"
                     variantPriceExVat = Parsing.ToDecimalOrNull(pricePart);
-                }
 
-                // Some variants may not show a "was" price individually, so we use the page-level "was" price for all of them.
                 var variant = new TuffermanVariant
                 {
                     BaseTitle = baseTitle,
                     RangeOrCategory = rangeOrCategory,
-                    HeightMm = heightMm,
+                    HeightMm = effectiveHeight,
                     WidthMm = widthMm,
                     DepthMm = depthMm,
                     LoadPerShelfKg = loadPerShelfKg,
-                    Levels = ExtractLevelsForVariant(doc, opt),    // simple helper below
+                    Levels = levels,
                     Units = units,
                     Colour = colourText ?? "",
                     WasPriceExVat = pageWasExVat,
                     NowPriceExVat = variantPriceExVat ?? pageNowExVat,
                     Url = url.ToString(),
                     Bullets = bulletsText,
-                    Supplier = "Tufferman"
+                    Supplier = supplier,
+                    DeliveryDays = deliveryDays
                 };
 
                 variants.Add(variant);
@@ -232,57 +259,58 @@ namespace TuffermanScraper
             return variants;
         }
 
-        #region Helpers
+        // ---------- HELPERS ----------
 
         private static string ExtractBullets(HtmlDocument doc)
         {
-            // Look for a Key Features heading and then the following <ul>
-            var heading = doc.DocumentNode.SelectSingleNode(
-                "//h2[contains(translate(., 'KEYFEATURES', 'keyfeatures'), 'key features')]"
+            var tabNode = doc.DocumentNode.SelectSingleNode(
+                "//*[@class='product__description-content-holder']" +
+                "//*[contains(@class,'tab-content') and contains(@class,'current')]"
             );
 
-            HtmlNode? list = null;
+            HtmlNode containerToUse = tabNode ?? doc.DocumentNode;
 
-            if (heading != null)
-            {
-                list = heading.SelectSingleNode("following-sibling::ul[1]");
-            }
-            if (list == null)
-            {
-                // Fallback: any <ul> inside a key-features-like container
-                list = doc.DocumentNode.SelectSingleNode(
-                    "//*[contains(translate(@class, 'KEYFEATURES', 'keyfeatures'), 'key-features')]//ul"
-                );
-            }
+            var textNodes = containerToUse.SelectNodes(".//p | .//li | .//strong");
 
-            if (list == null)
+            if (textNodes == null || textNodes.Count == 0)
                 return "";
 
-            var items = list.SelectNodes(".//li");
-            if (items == null || items.Count == 0)
-                return "";
+            var parts = new List<string>();
 
-            // Join bullets with " | " so it fits nicely into one CSV cell
-            var bulletTexts = items
-                .Select(li => HtmlEntity.DeEntitize(li.InnerText.Trim()))
-                .Where(t => !string.IsNullOrWhiteSpace(t));
+            foreach (var node in textNodes)
+            {
+                var txt = HtmlEntity.DeEntitize(node.InnerText ?? string.Empty).Trim();
 
-            return string.Join(" | ", bulletTexts);
+                if (string.IsNullOrWhiteSpace(txt))
+                    continue;
+
+                txt = System.Text.RegularExpressions.Regex.Replace(txt, @"\s+", " ");
+
+                parts.Add(txt);
+            }
+
+            var distinctParts = parts
+                .Where(p => !string.IsNullOrWhiteSpace(p))
+                .Distinct()
+                .ToList();
+
+            return string.Join(" | ", distinctParts);
         }
 
         private static (decimal? Was, decimal? Now) ExtractPricesExVat(HtmlDocument doc)
         {
-            // Ex VAT price block – based on tile markup you shared
             var exVatBlock = doc.DocumentNode.SelectSingleNode(
-                "//*[contains(@class,'price-list') and contains(@class,'ex-vat') and contains(@class,'active')]"
+                "//*[contains(@class,'price-list') and contains(@class,'ex-vat')]"
             );
 
             if (exVatBlock == null)
                 return (null, null);
 
-            // "was" price is usually in a price--compare span
-            var wasNode = exVatBlock.SelectSingleNode(".//span[contains(@class,'price--compare')]//span[contains(@class,'price-js')]");
-            var nowNode = exVatBlock.SelectSingleNode(".//span[contains(@class,'price--highlight')]//span[contains(@class,'price-js')]");
+            var wasNode = exVatBlock.SelectSingleNode(
+                ".//span[contains(@class,'price--compare')]//span[contains(@class,'price-js')]");
+
+            var nowNode = exVatBlock.SelectSingleNode(
+                ".//span[contains(@class,'price--highlight')]//span[contains(@class,'price-js')]");
 
             var was = Parsing.ToDecimalOrNull(wasNode?.InnerText);
             var now = Parsing.ToDecimalOrNull(nowNode?.InnerText);
@@ -290,96 +318,8 @@ namespace TuffermanScraper
             return (was, now);
         }
 
-        /// <summary>
-        /// Extracts textual option values for a labelled option group, e.g. "Height (mm)".
-        /// Returns the inner text of each clickable element (button/span/a) in that group.
-        /// </summary>
-        private static List<string?> ExtractOptionValues(HtmlDocument doc, string labelText, bool allowText = false)
-        {
-            var results = new List<string?>();
-
-            // Find any element whose text contains the label text, then move to the next sibling container
-            var labelNode = doc.DocumentNode.SelectSingleNode(
-                $"//*[contains(normalize-space(translate(., '{labelText.ToUpper()}', '{labelText.ToLower()}')), '{labelText.ToLower()}')]"
-            );
-
-            if (labelNode == null)
-                return results;
-
-            // Often options are in the next sibling div
-            var container = labelNode.SelectSingleNode("following-sibling::*[1]");
-            if (container == null)
-                container = labelNode.ParentNode;
-
-            if (container == null)
-                return results;
-
-            // Buttons or spans that represent options
-            var optionNodes = container.SelectNodes(".//button | .//a | .//span");
-            if (optionNodes == null)
-                return results;
-
-            foreach (var node in optionNodes)
-            {
-                var text = HtmlEntity.DeEntitize(node.InnerText).Trim();
-                if (string.IsNullOrWhiteSpace(text))
-                    continue;
-
-                // Filter out non-value text if this is a numeric option (unless allowText is true)
-                if (!allowText && Parsing.ToIntOrNull(text) == null)
-                    continue;
-
-                results.Add(text);
-            }
-
-            // Deduplicate
-            return results.Distinct().ToList();
-        }
-
-        private static List<string> ExtractColourOptions(HtmlDocument doc)
-        {
-            var colours = new List<string>();
-
-            // First try colour swatch buttons/links
-            var swatchNodes = doc.DocumentNode.SelectNodes(
-                "//*[contains(@class,'color-swatch')]/span[contains(@class,'color-swatch__item')]"
-            );
-
-            if (swatchNodes != null)
-            {
-                foreach (var node in swatchNodes)
-                {
-                    var style = node.GetAttributeValue("style", null);
-                    // e.g. "background-color: blue"
-                    if (!string.IsNullOrWhiteSpace(style))
-                    {
-                        var parts = style.Split(':', ';');
-                        if (parts.Length >= 2)
-                        {
-                            var colour = parts[1].Trim();
-                            if (!string.IsNullOrEmpty(colour))
-                                colours.Add(colour);
-                        }
-                    }
-                }
-            }
-
-            // Fallback: some pages might have a "Colour" option group like height/width
-            if (colours.Count == 0)
-            {
-                var colourTexts = ExtractOptionValues(doc, "Colour", allowText: true)
-                    .Where(c => !string.IsNullOrWhiteSpace(c))!
-                    .ToList();
-
-                colours.AddRange(colourTexts);
-            }
-
-            return colours.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
-        }
-
         private static string? ExtractSingleMetafieldValue(HtmlDocument doc, string labelText)
         {
-            // Find span with that exact label text
             var labelNode = doc.DocumentNode.SelectSingleNode(
                 $"//span[contains(@class,'metafield-variant_title') and normalize-space(text())='{labelText}']"
             );
@@ -387,10 +327,9 @@ namespace TuffermanScraper
             if (labelNode == null)
                 return null;
 
-            // Value is in a span.metafield_variant inside the following .metafield_variant_items
             var container = labelNode
-                .ParentNode?                           // product-form__option-name__container
-                .ParentNode?                           // metafield_variant_selector
+                .ParentNode?
+                .ParentNode?
                 .SelectSingleNode(".//div[contains(@class,'metafield_variant_items')]");
 
             if (container == null)
@@ -405,7 +344,6 @@ namespace TuffermanScraper
 
         private static string? ExtractColourMetafieldValue(HtmlDocument doc)
         {
-            // Colour section has metafield-variant_title "Colour:"
             var labelNode = doc.DocumentNode.SelectSingleNode(
                 "//span[contains(@class,'metafield-variant_title') and normalize-space(text())='Colour:']"
             );
@@ -413,7 +351,6 @@ namespace TuffermanScraper
             if (labelNode == null)
                 return null;
 
-            // Look for label.color-swatch__item with a title attribute
             var container = labelNode
                 .ParentNode?
                 .ParentNode?
@@ -430,7 +367,6 @@ namespace TuffermanScraper
             if (!string.IsNullOrWhiteSpace(titleAttr))
                 return titleAttr.Trim();
 
-            // Fallback: use background-color value
             var style = colourLabel.GetAttributeValue("style", null);
             if (!string.IsNullOrWhiteSpace(style))
             {
@@ -442,11 +378,8 @@ namespace TuffermanScraper
             return null;
         }
 
-        // For now, levels are always "4" in your snippet; we can keep it simple.
         private static int? ExtractLevelsForVariant(HtmlDocument doc, HtmlNode optionNode)
         {
-            // Each option has an ID we could tie to the upgrade_... sections,
-            // but your snippet shows "Levels: 4" for all of them, so we just parse one.
             var levelsNode = doc.DocumentNode.SelectSingleNode(
                 "//span[@class='product-form__option-text text--strong' and contains(., 'Levels:')]"
             );
@@ -454,14 +387,66 @@ namespace TuffermanScraper
             if (levelsNode == null)
                 return null;
 
-            var valNode = levelsNode.SelectSingleNode("./following-sibling::a[1]//span[contains(@class,'metafield_variant')]");
+            var valNode = levelsNode.SelectSingleNode(
+                "./following-sibling::a[1]//span[contains(@class,'metafield_variant')]");
+
             if (valNode == null)
-                return Parsing.ToIntOrNull("4"); // safe fallback
+                return null;
 
             var text = HtmlEntity.DeEntitize(valNode.InnerText).Trim();
             return Parsing.ToIntOrNull(text);
         }
 
-        #endregion
+        private static string? ExtractOptionGroupValue(HtmlDocument doc, string label)
+        {
+            var lower = label.ToLowerInvariant();
+
+            var labelNode = doc.DocumentNode.SelectSingleNode(
+                "//span[contains(@class,'product-form__option-name') and " +
+                $"contains(translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '{lower}')]"
+            );
+
+            if (labelNode == null)
+                return null;
+
+            var selected = labelNode.SelectSingleNode(".//span[contains(@class,'product-form__selected-value')]");
+            if (selected != null)
+                return HtmlEntity.DeEntitize(selected.InnerText).Trim();
+
+            var optionContainer = labelNode.ParentNode?.ParentNode;
+            if (optionContainer == null)
+                return null;
+
+            var textNode = optionContainer.SelectSingleNode(
+                ".//span[contains(@class,'block-swatch__item-text')]");
+            return textNode != null
+                ? HtmlEntity.DeEntitize(textNode.InnerText).Trim()
+                : null;
+        }
+
+        private static int? ExtractDeliveryDays(HtmlDocument doc)
+        {
+            var indicators = doc.DocumentNode.SelectSingleNode(
+                "//*[contains(@class,'product-indicators')]"
+            );
+            var indicatorText = indicators != null
+                ? HtmlEntity.DeEntitize(indicators.InnerText).ToLowerInvariant()
+                : string.Empty;
+
+            var deliveryTab = doc.DocumentNode.SelectSingleNode("//*[@id='tab-delivery']");
+            var deliveryText = deliveryTab != null
+                ? HtmlEntity.DeEntitize(deliveryTab.InnerText).ToLowerInvariant()
+                : string.Empty;
+
+            var all = indicatorText + " " + deliveryText;
+
+            if (string.IsNullOrWhiteSpace(all))
+                return null;
+
+            if (all.Contains("24hr") || all.Contains("24 hr") || all.Contains("next day"))
+                return 1;
+
+            return null;
+        }
     }
 }

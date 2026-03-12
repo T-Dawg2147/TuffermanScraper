@@ -1,55 +1,56 @@
-﻿using HtmlAgilityPack;
+﻿using CsvHelper;
+using CsvHelper.Configuration;
+using System.Globalization;
+using TuffermanScraper.Test.Models;
+using TuffermanScraper.Test.Transformers;
 
-namespace TuffermanScraper
+namespace TuffermanScraper.Test
 {
-    internal class Program
+    internal static class Program
     {
-        private static readonly HttpClient Http = new()
+        private static readonly string[] TestUrls =
         {
-            BaseAddress = new Uri("https://www.tufferman.co.uk"),
+            "https://www.tufferman.co.uk/products/3x-vrs-heavy-duty-shelving-1800mm-high-200-280kg-grey",
+            "https://www.tufferman.co.uk/products/1x-vrs-shelving-unit-1800mm-high-grey-with-wham-diy-recycled-plastic-storage-boxes",
+            "https://www.tufferman.co.uk/products/1x-eclipse-chrome-wire-shelving-extension-bay-1625mm-high-300kg",
+            "https://www.tufferman.co.uk/products/twin-slot-wall-mounted-shelving-1000mm-wide-melamine-black"
         };
 
-        private const string AllShelvingUrl = "https://www.tufferman.co.uk/collections/all-shelving";
-        private const int totalPages = 36;
-
-        public static async Task Main(string[] args)
+        private static async Task Main()
         {
-            Http.DefaultRequestHeaders.UserAgent.ParseAdd(
-                "ShelvingDataCollector/1.0 (+internal use; contact your-email@yourcompany.com)");
+            using var http = new HttpClient();
 
-            var scraper = new TuffermanScraper(Http);
+            http.DefaultRequestHeaders.UserAgent.Clear();
+            http.DefaultRequestHeaders.UserAgent.ParseAdd(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+                "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36");
 
-            var testUrl = new Uri("https://www.tufferman.co.uk/products/3x-vrs-heavy-duty-shelving-1800mm-high-200-280kg-grey");
+            http.DefaultRequestHeaders.Accept.ParseAdd("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8");
+            http.DefaultRequestHeaders.AcceptLanguage.ParseAdd("en-GB,en;q=0.9");
+            http.DefaultRequestHeaders.ConnectionClose = false;
 
-            var variants = await scraper.ScrapeProductPageAsync(testUrl);
+            var allRows = new List<TuffermanVariantRow>();
 
-            Console.WriteLine("Variants scraped:");
-            foreach (var v in variants)
+            foreach (var url in TestUrls)
             {
-                Console.WriteLine(
-                    $"{v.BaseTitle} | H={v.HeightMm} W={v.WidthMm} D={v.DepthMm} " +
-                    $"Load={v.LoadPerShelfKg} Levels={v.Levels} Units={v.Units} Colour={v.Colour} " +
-                    $"Was={v.WasPriceExVat} Now={v.NowPriceExVat}");
+                Console.WriteLine($"Scraping product page: {url}");
+
+                var html = await http.GetStringAsync(url);
+
+                var rows = TuffermanProductExtractor.ExtractFromHtml(html, url);
+
+                Console.WriteLine($"  -> Producted {rows.Count} variant row(s)");
+                foreach (var r in rows)
+                {
+                    Console.WriteLine($"{r.Supplier} | H={r.HeightMm} D={r.DepthMm} W={r.WidthMm} Load={r.MaxLoadPerLevelKg} | Was={r.WasPriceExVat} Now={r.NowPriceExVat}");
+                }
+                allRows.AddRange(rows);
             }
 
-            Console.WriteLine($"Total variants: {variants.Count}");
-        }
+            const string outputPath = "Tufferman-Test-Shelving.csv";
+            TuffermanProductExtractor.WriteCsv(outputPath, allRows);
 
-        public static async Task Main_other(string[] args)
-        {
-            Http.DefaultRequestHeaders.UserAgent.ParseAdd(
-                "ShelvingDataCollector/1.0 (+internal use; contact harryc@slingsby.com)");
-
-            var scraper = new TuffermanScraper(Http);
-
-            var allProductUrls = await scraper.GetAllProductUrlsAsync(AllShelvingUrl, totalPages);
-
-            foreach (var url in allProductUrls)
-            {
-                Console.WriteLine(url);
-            }
-
-            Console.WriteLine($"Done. Total product URLs: {allProductUrls.Count}");
+            Console.WriteLine($"Wrote {allRows.Count} rows to {outputPath}");
         }
     }
 }
