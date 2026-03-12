@@ -14,5 +14,8 @@ namespace TuffermanScraper.Test.Models
 
         [JsonPropertyName("name")]
         public string? Name { get; set; }
+
+        [JsonPropertyName("values")]
+        public List<string> Values { get; set; } = [];
     }
 }
