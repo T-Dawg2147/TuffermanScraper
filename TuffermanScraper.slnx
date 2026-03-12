@@ -1,0 +1,5 @@
+<Solution>
+  <Project Path="TuffermanScraper.ExtractTest/TuffermanScraper.ExtractTest.csproj" />
+  <Project Path="TuffermanScraper.TitleTest/TuffermanScraper.TitleTest.csproj" />
+  <Project Path="TuffermanScraper/TuffermanScraper.csproj" />
+</Solution>
