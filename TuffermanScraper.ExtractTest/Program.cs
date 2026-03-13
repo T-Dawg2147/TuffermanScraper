@@ -3,6 +3,7 @@ using CsvHelper.Configuration;
 using System.Globalization;
 using TuffermanScraper.ExtractTest.Models;
 using TuffermanScraper.ExtractTest.Transformers;
+using static System.Net.WebRequestMethods;
 
 namespace TuffermanScraper.ExtractTest
 {
@@ -18,25 +19,29 @@ namespace TuffermanScraper.ExtractTest
 
         public static async Task Main(string[] args)
         {
+            /*Http.DefaultRequestHeaders.UserAgent.ParseAdd(
+                "ShelvingDataCollector/1.3 (+internal use; harryc@slingsby.com)");*/
+            Http.DefaultRequestHeaders.UserAgent.Clear();
             Http.DefaultRequestHeaders.UserAgent.ParseAdd(
-                "ShelvingDataCollector/1.0 (+internal use; harryc@slingsby.com)");
+                "Chrome/122.0.0.0");
+            Http.DefaultRequestHeaders.Accept.ParseAdd("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8");
+            Http.DefaultRequestHeaders.AcceptLanguage.ParseAdd("en-GB,en;q=0.9");
+            Http.DefaultRequestHeaders.ConnectionClose = false;
+
 
             var scraper = new TuffermanScraper(Http);
 
             // --- OPTION A: test on a single product page ---
-            var testUrls = new[]
-            {
-                new Uri("https://www.tufferman.co.uk/products/3x-vrs-heavy-duty-shelving-1800mm-high-200-280kg-grey"),
-                new Uri("https://www.tufferman.co.uk/products/1x-vrs-shelving-unit-1800mm-high-grey-with-wham-diy-recycled-plastic-storage-boxes"),
-                new Uri("https://www.tufferman.co.uk/products/1x-eclipse-chrome-wire-shelving-extension-bay-1625mm-high-300kg"),
-                new Uri("https://www.tufferman.co.uk/products/twin-slot-wall-mounted-shelving-1000mm-wide-melamine-black")
-            };
+            var testUrlsReadonly = scraper.GetAllProductUrlsAsync(AllShelvingUrl, TotalPages);
+
+            var testUrls = testUrlsReadonly.Result.ToList();
 
             var allTestVariants = new List<TuffermanVariant>();
 
             foreach (var u in testUrls)
             {
                 var vs = await scraper.ScrapeProductPageAsync(u);
+                await Task.Delay(TimeSpan.FromSeconds(5));
                 Console.WriteLine($"=== Variants for {u} ===");
                 DumpVariants(vs);
                 allTestVariants.AddRange(vs);

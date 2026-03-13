@@ -49,7 +49,6 @@ namespace TuffermanScraper
                 productUrls.Add(href);
             }
 
-            Console.WriteLine($"Found {productUrls.Count} product URL(s) on {listingUrl}");
             return productUrls.Select(u => new Uri(u)).ToList();
         }
 
@@ -66,7 +65,7 @@ namespace TuffermanScraper
                 foreach (var uri in pageUrls)
                     allUrls.Add(uri.ToString());
 
-                await Task.Delay(TimeSpan.FromSeconds(1));
+                await Task.Delay(TimeSpan.FromSeconds(5));
             }
 
             Console.WriteLine($"Total unique product URLs found across all pages: {allUrls.Count}");
@@ -96,7 +95,6 @@ namespace TuffermanScraper
             var bulletsText = ExtractBullets(doc);
 
             var (pageWasExVat, pageNowExVat) = ExtractPricesExVat(doc);
-            Console.WriteLine($"  Prices (EX VAT): WAS={pageWasExVat} NOW={pageNowExVat}");
 
             var heightText = ExtractSingleMetafieldValue(doc, "Height (mm):");
             var heightMm = Parsing.ToIntOrNull(heightText);
@@ -113,7 +111,6 @@ namespace TuffermanScraper
             var selectNode = doc.DocumentNode.SelectSingleNode("//select[@name='id']");
             if (selectNode == null)
             {
-                Console.WriteLine("  !! No <select name='id'> found; returning single variant with page-level info");
                 variants.Add(new TuffermanVariant
                 {
                     BaseTitle = baseTitle,
@@ -134,7 +131,6 @@ namespace TuffermanScraper
             var optionNodes = selectNode.SelectNodes("./option");
             if (optionNodes == null || optionNodes.Count == 0)
             {
-                Console.WriteLine("  !! <select name='id'> has no options; returning single variant");
                 variants.Add(new TuffermanVariant
                 {
                     BaseTitle = baseTitle,
@@ -245,7 +241,7 @@ namespace TuffermanScraper
                     Units = units,
                     Colour = colourText ?? "",
                     WasPriceExVat = pageWasExVat,
-                    NowPriceExVat = variantPriceExVat ?? pageNowExVat,
+                    NowPriceExVat = pageNowExVat ?? variantPriceExVat,
                     Url = url.ToString(),
                     Bullets = bulletsText,
                     Supplier = supplier,
