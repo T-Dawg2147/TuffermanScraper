@@ -14,7 +14,11 @@ internal static class Program
         "https://www.tufferman.co.uk/products/twin-slot-wall-mounted-shelving-1000mm-wide-melamine-black"
     };
 
-    private static async Task Main()
+    // Full collection scraping constants
+    private const string AllShelvingUrl = "https://www.tufferman.co.uk/collections/all-shelving";
+    private const int TotalPages = 36;
+
+    private static async Task Main(string[] args)
     {
         using var http = new HttpClient();
 
@@ -30,7 +34,23 @@ internal static class Program
         var scraper = new CompleteScraper(http);
         var allRows = new List<ShelvingRow>();
 
-        foreach (var url in TestUrls)
+        // Determine whether to run in test mode or full mode
+        bool fullMode = args.Length > 0 && args[0].Equals("--full", StringComparison.OrdinalIgnoreCase);
+
+        IEnumerable<string> urls;
+        if (fullMode)
+        {
+            Console.WriteLine($"Full scrape mode: collecting all product URLs from {AllShelvingUrl} ({TotalPages} pages)...");
+            var productUris = await scraper.GetAllProductUrlsAsync(AllShelvingUrl, TotalPages);
+            urls = productUris.Select(u => u.ToString());
+        }
+        else
+        {
+            Console.WriteLine("Test mode: scraping a small set of test URLs. Pass --full to scrape everything.");
+            urls = TestUrls;
+        }
+
+        foreach (var url in urls)
         {
             try
             {
@@ -69,3 +89,4 @@ internal static class Program
         Console.WriteLine($"\nWrote {allRows.Count} rows to {outputPath}");
     }
 }
+

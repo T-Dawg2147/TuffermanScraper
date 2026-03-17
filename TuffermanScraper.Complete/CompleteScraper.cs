@@ -54,6 +54,73 @@ namespace TuffermanScraper.Complete
             _http = httpClient;
         }
 
+        // ---------- LISTING PAGES ----------
+
+        /// <summary>
+        /// Extracts all product URLs from a single listing/collection page.
+        /// </summary>
+        public async Task<IReadOnlyList<Uri>> GetProductUrlsFromListingAsync(string listingUrl)
+        {
+            var html = await _http.GetStringAsync(listingUrl);
+            var doc = new HtmlDocument();
+            doc.LoadHtml(html);
+
+            var productUrls = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            var productNodes = doc.DocumentNode.SelectNodes("//div[contains(@class,'product-item ')]");
+            if (productNodes == null)
+            {
+                Console.WriteLine("No product-item divs found on " + listingUrl);
+                return Array.Empty<Uri>();
+            }
+
+            foreach (var productNode in productNodes)
+            {
+                var linkNode =
+                    productNode.SelectSingleNode(".//a[contains(@class,'product-item__link')]") ??
+                    productNode.SelectSingleNode(".//a[contains(@class,'product-item__title')]");
+
+                if (linkNode == null)
+                    continue;
+
+                var href = linkNode.GetAttributeValue("href", string.Empty);
+                if (string.IsNullOrWhiteSpace(href))
+                    continue;
+
+                if (href.StartsWith("/"))
+                    href = "https://www.tufferman.co.uk" + href;
+
+                productUrls.Add(href);
+            }
+
+            return productUrls.Select(u => new Uri(u)).ToList();
+        }
+
+        /// <summary>
+        /// Scrapes all pages of a collection URL and returns unique product URLs.
+        /// </summary>
+        public async Task<IReadOnlyList<Uri>> GetAllProductUrlsAsync(string baseCollectionUrl, int totalPages)
+        {
+            var allUrls = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            for (int page = 1; page <= totalPages; page++)
+            {
+                var url = page == 1 ? baseCollectionUrl : $"{baseCollectionUrl}?page={page}";
+                Console.WriteLine($"=== Page {page} of {totalPages} ===");
+
+                var pageUrls = await GetProductUrlsFromListingAsync(url);
+                foreach (var uri in pageUrls)
+                    allUrls.Add(uri.ToString());
+
+                await Task.Delay(TimeSpan.FromSeconds(5));
+            }
+
+            Console.WriteLine($"Total unique product URLs found across all pages: {allUrls.Count}");
+            return allUrls.Select(u => new Uri(u)).ToList();
+        }
+
+        // ---------- PRODUCT PAGES ----------
+
         /// <summary>
         /// Fetches the product page, extracts data, and returns one ShelvingRow per variant.
         /// </summary>
@@ -140,9 +207,6 @@ namespace TuffermanScraper.Complete
             var uprightColour = ExtractColourMetafieldValue(doc)
                 ?? DetectColourFromTitleOrDescription(productTitle, descriptionText);
 
-            // EX VAT prices from HTML (primary source)
-            var (pageWasExVat, pageNowExVat) = ExtractPricesExVat(doc);
-
             // --- Per-variant rows ---
             foreach (var v in variants)
             {
@@ -156,9 +220,9 @@ namespace TuffermanScraper.Complete
                 if (maxLoad == null)
                     maxLoad = Parsing.ParseMaxLoadFromText(descriptionText);
 
-                // Prices: use HTML EX VAT prices if found; fall back to JSON inc-VAT ÷ 1.2
-                decimal? wasPriceExVat = pageWasExVat ?? ToMoneyExVat(v.CompareAtPricePence);
-                decimal? nowPriceExVat = pageNowExVat ?? ToMoneyExVat(v.PricePence);
+                // INC-VAT pence from JSON → converted to EX-VAT pounds (Test project approach)
+                decimal? wasPriceExVat = ToMoneyExVat(v.CompareAtPricePence);
+                decimal? nowPriceExVat = ToMoneyExVat(v.PricePence);
 
                 var row = new ShelvingRow
                 {
@@ -274,24 +338,17 @@ namespace TuffermanScraper.Complete
         // ---------- DIMENSION PARSING ----------
 
         /// <summary>
-        /// Parses width, depth, and load from a variant's options and title.
-        /// Priority: option1/option2/option3, then variant title "W / D / Load".
+        /// Parses width, depth, and load from a variant's title and options.
+        /// Priority: ParseVariantTitle() first (Test project approach), then option1/option2/option3 as fallback.
         /// </summary>
         private static (int? Width, int? Depth, int? Load) ParseVariantDimensions(VariantData v)
         {
-            // Try option1 (width), option2 (depth), option3 (load) first
-            int? width = SafeParseInt(v.Option1);
-            int? depth = SafeParseInt(v.Option2);
-            int? load = ParseLoad(v.Option3);
+            // ParseVariantTitle first (matches Test project's ExtractFromHtml approach)
+            var (titleWidth, titleDepth, titleLoad) = ParseVariantTitle(v.Title);
 
-            // If option1 didn't parse cleanly (e.g. concatenated dims), try variant title
-            if (width == null || depth == null)
-            {
-                var (titleWidth, titleDepth, titleLoad) = ParseVariantTitle(v.Title);
-                if (width == null) width = titleWidth;
-                if (depth == null) depth = titleDepth;
-                if (load == null) load = titleLoad;
-            }
+            int? width = titleWidth ?? SafeParseInt(v.Option1);
+            int? depth = titleDepth ?? SafeParseInt(v.Option2);
+            int? load = titleLoad ?? ParseLoad(v.Option3);
 
             return (width, depth, load);
         }
@@ -419,31 +476,6 @@ namespace TuffermanScraper.Complete
             }
 
             return sb.ToString();
-        }
-
-        /// <summary>
-        /// Reads EX VAT prices from the HTML price-list/ex-vat block.
-        /// Returns (Was, Now) ex-vat decimals, or (null, null) if block not found.
-        /// </summary>
-        private static (decimal? Was, decimal? Now) ExtractPricesExVat(HtmlDocument doc)
-        {
-            var exVatBlock = doc.DocumentNode.SelectSingleNode(
-                "//*[contains(@class,'price-list') and contains(@class,'ex-vat')]"
-            );
-
-            if (exVatBlock == null)
-                return (null, null);
-
-            var wasNode = exVatBlock.SelectSingleNode(
-                ".//span[contains(@class,'price--compare')]//span[contains(@class,'price-js')]");
-
-            var nowNode = exVatBlock.SelectSingleNode(
-                ".//span[contains(@class,'price--highlight')]//span[contains(@class,'price-js')]");
-
-            var was = Parsing.ToDecimalOrNull(wasNode?.InnerText);
-            var now = Parsing.ToDecimalOrNull(nowNode?.InnerText);
-
-            return (was, now);
         }
 
         /// <summary>
