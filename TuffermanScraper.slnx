@@ -1,5 +1,5 @@
 <Solution>
+  <Project Path="TuffermanScraper.Complete/TuffermanScraper.Complete.csproj" Id="7daef765-c7ea-434c-bd69-37eb3f630a64" />
   <Project Path="TuffermanScraper.ExtractTest/TuffermanScraper.ExtractTest.csproj" />
-  <Project Path="TuffermanScraper.TitleTest/TuffermanScraper.TitleTest.csproj" />
   <Project Path="TuffermanScraper/TuffermanScraper.Test.csproj" />
 </Solution>
